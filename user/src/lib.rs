@@ -40,3 +40,4 @@ fn main() -> i32 {
     panic!("Cannot find main!");
 }
 pub fn yield_() -> isize { sys_yield() }
+pub fn get_time() -> isize { sys_get_time() }
