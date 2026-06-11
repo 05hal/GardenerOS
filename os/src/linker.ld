@@ -7,12 +7,16 @@ SECTIONS
     . = BASE_ADDRESS;
     skernel = .;
 
+
     stext = .;
     .text : {
         *(.text.entry)
+        . = ALIGN(4K);
+        strampoline = .;
+        *(.text.trampoline);
+        . = ALIGN(4K);
         *(.text .text.*)
     }
-
     . = ALIGN(4K);
     etext = .;
     srodata = .;
@@ -32,12 +36,12 @@ SECTIONS
     . = ALIGN(4K);
     edata = .;
     .bss : {
+        sbss_with_stack = .;
         *(.bss.stack)
         sbss = .;
         *(.bss .bss.*)
         *(.sbss .sbss.*)
     }
-
     . = ALIGN(4K);
     ebss = .;
     ekernel = .;

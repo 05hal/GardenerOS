@@ -1,5 +1,5 @@
 use core::arch::global_asm;
-
+use core::arch::asm;
 global_asm!(include_str!("trap.S"));
 
 mod context;
@@ -13,66 +13,90 @@ use riscv::register::{
 };
 
 use crate::syscall::syscall;
-use crate::task::{exit_current_and_run_next, suspend_current_and_run_next};
 use crate::timer::set_next_trigger;
-
-/// 初始化 Trap 向量
+use crate::config::{TRAP_CONTEXT, TRAMPOLINE};
+use crate::task::{
+    current_trap_cx,
+    current_user_token,
+    exit_current_and_run_next,
+    suspend_current_and_run_next,
+};
 pub fn init() {
-    extern "C" { fn __alltraps(); }
+    set_kernel_trap_entry();
+}
+
+fn set_kernel_trap_entry() {
     unsafe {
-        stvec::write(__alltraps as *const () as usize, TrapMode::Direct);
+        stvec::write(trap_from_kernel as *const () as usize, TrapMode::Direct);
     }
 }
 
-/// 使能时钟中断
+fn set_user_trap_entry() {
+    unsafe {
+        stvec::write(TRAMPOLINE as *const () as usize, TrapMode::Direct);
+    }
+}
 pub fn enable_timer_interrupt() {
     unsafe { riscv::register::sie::set_stimer(); }
 }
 
-/// Trap 处理函数
-#[unsafe(no_mangle)]
-pub fn trap_handler(cx: &mut TrapContext) -> &mut TrapContext {
+#[no_mangle]
+pub fn trap_handler() -> ! {
+    set_kernel_trap_entry();
+    let cx = current_trap_cx();
     let scause = scause::read();
     let stval = stval::read();
-
     match scause.cause() {
-        // 用户环境调用 (系统调用)
         Trap::Exception(Exception::UserEnvCall) => {
             cx.sepc += 4;
             cx.x[10] = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]) as usize;
         }
-
-        // 页错误或存储异常
         Trap::Exception(Exception::StoreFault) |
         Trap::Exception(Exception::StorePageFault) => {
-            println!(
-                "[kernel] PageFault in application, bad addr = {:#x}, bad instruction = {:#x}, core dumped.",
-                stval, cx.sepc
-            );
+            println!("[kernel] PageFault in application, bad addr = {:#x}, bad instruction = {:#x}, core dumped.", stval, cx.sepc);
             exit_current_and_run_next();
         }
-
-        // 非法指令
         Trap::Exception(Exception::IllegalInstruction) => {
             println!("[kernel] IllegalInstruction in application, core dumped.");
             exit_current_and_run_next();
         }
-
-        // Supervisor Timer 中断：实现抢占式调度
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
-            set_next_trigger();                // 设置下一次触发
-            suspend_current_and_run_next();    // 挂起当前任务并切换到下一个
+            set_next_trigger();
+            suspend_current_and_run_next();
         }
-
-        // 其他未支持异常
         _ => {
-            panic!(
-                "Unsupported trap {:?}, stval = {:#x}!",
-                scause.cause(),
-                stval
-            );
+            panic!("Unsupported trap {:?}, stval = {:#x}!", scause.cause(), stval);
         }
     }
-
-    cx
+    
+    trap_return();
 }
+
+#[no_mangle]
+pub fn trap_return() -> ! {
+    set_user_trap_entry();
+    let trap_cx_ptr = TRAP_CONTEXT;
+    let user_satp = current_user_token();
+    extern "C" {
+        fn __alltraps();
+        fn __restore();
+    }
+    let restore_va = __restore as *const () as usize - __alltraps as *const () as usize + TRAMPOLINE;
+    unsafe {
+        asm!(
+            "fence.i",
+            "jr {restore_va}",
+            restore_va = in(reg) restore_va,
+            in("a0") trap_cx_ptr,
+            in("a1") user_satp,
+            options(noreturn),
+        );
+    }   
+   
+}
+
+#[no_mangle]
+pub fn trap_from_kernel() -> ! {
+    panic!("a trap from kernel!");
+}
+
